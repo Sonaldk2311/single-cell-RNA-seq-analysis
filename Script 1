@@ -1,0 +1,97 @@
+#Work with R version 4.1.2 only with this specific seed set to generate/ replicate images/ UMAPs.
+library(ggplot2)
+library(tidyverse)
+library(RColorBrewer)
+library(uwot)
+library(dplyr)
+library(Seurat)
+library(gridExtra)
+library(scDblFinder)
+library(biomaRt)
+library(EnhancedVolcano)
+
+create_seurat_object <- function(sample_name) {
+  # Form the path to the sample's filtered_feature_bc_matrix directory
+  filtered_feature_bc_matrix_dir <- file.path("/projectnb/msc-evs/scripts", sample_name, "outs", "filtered_feature_bc_matrix")
+  
+  # Read the Cell Ranger Count output using Read10X
+  seurat_object <- Read10X(data.dir = filtered_feature_bc_matrix_dir)
+  
+  # Create a Seurat object with the loaded data
+  seurat_object <- CreateSeuratObject(counts = seurat_object)
+  
+  # (Optional) If you have mitochondrial genes in your gene metadata file, you can calculate the percentage of mitochondrial genes:
+  seurat_object$percent.mito <- PercentageFeatureSet(seurat_object, pattern = "^MT-")
+  
+  return(seurat_object)
+}
+
+# Create 7 separate Seurat objects
+ZE_1_1A <- create_seurat_object("ZE_1_1A")
+ZE_2_1B <- create_seurat_object("ZE_2_1B")
+ZE_3_12A <- create_seurat_object("ZE_3_12A")
+ZE_4_12B <- create_seurat_object("ZE_4_12B")
+ZE_5_FC1 <- create_seurat_object("ZE_5_FC1")
+ZE_6_FC2<- create_seurat_object("ZE_6_FC2")
+
+#Merge all the seurat objects.
+merged_seurat <- merge(ZE_1_1A,y=c(ZE_2_1B,ZE_3_12A,ZE_4_12B,ZE_5_FC1,ZE_6_FC2), add.cell.ids = c("1A","1B","12A","12B","FC1","FC2"),
+                       project = "Data Set 1")
+#num_cells <- ncol(merged_seurat_filtered)
+
+
+#downstream analysis
+merged_seurat$sample <- rownames(merged_seurat@meta.data)
+merged_seurat@meta.data <- separate(merged_seurat@meta.data, col = 'sample', into = c('code', 'sample','sample_code', 'Barcode'), sep = '_')
+#filtering
+merged_seurat <- subset(merged_seurat, subset = percent.mito < 7.5 & nFeature_RNA > 200)
+#View(merged_seurat_filtered@meta.data)
+#Normalize data
+merged_seurat <- NormalizeData(object = merged_seurat)
+#scale data
+merged_seurat <- ScaleData(object = merged_seurat)
+#######
+# Extract the gene expression matrix from the merged Seurat object
+expression_matrix <- GetAssayData(merged_seurat, assay = "RNA")
+
+# Run scDblFinder on the expression matrix
+dbl_results <- scDblFinder(expression_matrix, verbose = TRUE)
+# Access the 'scDblFinder.class' or 'scDblFinder.score' column in colData
+doublet_class <- dbl_results$scDblFinder.class
+
+# Count the number of cells classified as doublets
+num_doublets <- sum(doublet_class == "doublet")
+
+# Print the number of doublets
+cat("Number of doublets detected:", num_doublets, "\n")
+
+# Define a range of threshold values (e.g., from 0.01 to 0.10 in increments of 0.01)
+thresholds <- seq(0.01, 0.10, by = 0.01)
+
+# Initialize a vector to store the number of doublets for each threshold
+num_doublets <- numeric(length(thresholds))
+
+# Iterate through the thresholds and run scDblFinder
+for (i in 1:length(thresholds)) {
+  custom_threshold <- thresholds[i]
+  dbl_results <- scDblFinder(expression_matrix, threshold = custom_threshold, verbose = FALSE)
+  
+  # Count the number of cells classified as doublets
+  num_doublets[i] <- sum(dbl_results$scDblFinder.class == "doublet")
+}
+
+# Create a plot to visualize the number of doublets for each threshold
+plot(thresholds, num_doublets, type = "b", xlab = "Threshold", ylab = "Number of Doublets")
+
+dbl_results_0.04 <- scDblFinder(expression_matrix, verbose = TRUE, threshold = 0.02)
+
+
+# Assuming 'dbl_results' contains cell classifications as 'scDblFinder.class'
+# Replace 'doublet' with the actual classification if it's different
+dbl_classifications <- dbl_results$scDblFinder.class
+
+# Create a subset of the Seurat object, excluding cells classified as doublets
+filtered_seurat <- merged_seurat[, dbl_classifications != "doublet"]
+#save the seurat file for future analysis as well
+# Save the filtered Seurat object to a file
+saveRDS(filtered_seurat, file = "filtered_seurat.rds")
